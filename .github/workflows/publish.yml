@@ -1,0 +1,149 @@
+name: Build & Deploy
+
+# 流程：
+#   push 到 main / PR  -> 编译(sdist+wheel) + 部署到【测试服务器】
+#   push tag v*        -> 编译 + 部署到【正式服务器】
+#   workflow_dispatch   -> 手动触发，可选部署到 test / prod
+#
+# 需要在 GitHub 仓库配置 Secrets（Settings -> Secrets and variables -> Actions）：
+#
+#   测试服务器：
+#     TEST_SSH_HOST      测试服务器 IP / 域名
+#     TEST_SSH_PORT      SSH 端口（默认 22）
+#     TEST_SSH_USER      SSH 登录用户
+#     TEST_SSH_KEY       SSH 私钥全文（-----BEGIN OPENSSH PRIVATE KEY----- ...）
+#     TEST_DEPLOY_PATH   远端部署目录（dist 会传到该目录下）
+#
+#   正式服务器：
+#     PROD_SSH_HOST / PROD_SSH_PORT / PROD_SSH_USER / PROD_SSH_KEY / PROD_DEPLOY_PATH
+#
+# 如果你希望改成发布到 PyPI（而不是自己的服务器），把 deploy-* 两个 job
+# 换成 pypa/gh-action-pypi-publish 即可，build job 保持不变。
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      target:
+        description: "手动部署目标"
+        type: choice
+        default: test
+        options: [test, prod]
+
+jobs:
+  build:
+    name: Build distribution
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install build frontend
+        run: python -m pip install --upgrade pip build twine
+
+      - name: Bump to dev version on main pushes
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        run: |
+          python - <<'EOF'
+          import pathlib, re, os
+          p = pathlib.Path("pyproject.toml")
+          text = p.read_text(encoding="utf-8")
+          m = re.search(r'^version\s*=\s*"([^"]+)"', text, re.MULTILINE)
+          base = m.group(1)
+          run_id = os.environ["GITHUB_RUN_NUMBER"]
+          new_version = f"{base}.dev{run_id}"
+          p.write_text(text[:m.start()] + f'version = "{new_version}"' + text[m.end():], encoding="utf-8")
+          print(f"Version: {base} -> {new_version}")
+          EOF
+
+      - name: Build sdist & wheel
+        run: python -m build
+
+      - name: Check distribution metadata
+        run: python -m twine check dist/*
+
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist/
+          retention-days: 7
+
+  # push main / PR -> 部署到测试服务器
+  deploy-test:
+    name: Deploy to test server
+    needs: build
+    runs-on: ubuntu-latest
+    if: (github.event_name == 'push' && github.ref == 'refs/heads/main') || (github.event_name == 'workflow_dispatch' && github.event.inputs.target == 'test')
+    steps:
+      - name: Download build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist/
+
+      - name: Copy package to test server
+        uses: appleboy/scp-action@v0.1.7
+        with:
+          host: ${{ secrets.TEST_SSH_HOST }}
+          username: ${{ secrets.TEST_SSH_USER }}
+          port: ${{ secrets.TEST_SSH_PORT }}
+          key: ${{ secrets.TEST_SSH_KEY }}
+          source: "dist/*.whl,dist/*.tar.gz"
+          target: ${{ secrets.TEST_DEPLOY_PATH }}
+
+      - name: Install package on test server
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.TEST_SSH_HOST }}
+          username: ${{ secrets.TEST_SSH_USER }}
+          port: ${{ secrets.TEST_SSH_PORT }}
+          key: ${{ secrets.TEST_SSH_KEY }}
+          script: |
+            cd ${{ secrets.TEST_DEPLOY_PATH }}
+            python3 -m pip install --upgrade --force-reinstall dist/*.whl
+            wechat-publish --help
+
+  # push tag v* -> 部署到正式服务器
+  deploy-prod:
+    name: Deploy to production server
+    needs: build
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/v') || (github.event_name == 'workflow_dispatch' && github.event.inputs.target == 'prod')
+    steps:
+      - name: Download build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist/
+
+      - name: Copy package to production server
+        uses: appleboy/scp-action@v0.1.7
+        with:
+          host: ${{ secrets.PROD_SSH_HOST }}
+          username: ${{ secrets.PROD_SSH_USER }}
+          port: ${{ secrets.PROD_SSH_PORT }}
+          key: ${{ secrets.PROD_SSH_KEY }}
+          source: "dist/*.whl,dist/*.tar.gz"
+          target: ${{ secrets.PROD_DEPLOY_PATH }}
+
+      - name: Install package on production server
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.PROD_SSH_HOST }}
+          username: ${{ secrets.PROD_SSH_USER }}
+          port: ${{ secrets.PROD_SSH_PORT }}
+          key: ${{ secrets.PROD_SSH_KEY }}
+          script: |
+            cd ${{ secrets.PROD_DEPLOY_PATH }}
+            python3 -m pip install --upgrade --force-reinstall dist/*.whl
+            wechat-publish --help
