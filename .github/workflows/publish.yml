@@ -1,24 +1,12 @@
-name: Build & Deploy
+name: Build & Publish
 
-# 流程：
-#   push 到 main / PR  -> 编译(sdist+wheel) + 部署到【测试服务器】
-#   push tag v*        -> 编译 + 部署到【正式服务器】
-#   workflow_dispatch   -> 手动触发，可选部署到 test / prod
+# 流程（与 wechat-formatter 一致）：
+#   push 到 main / PR   -> 构建 + 发布到 TestPyPI（官方测试源，验证打包不污染正式版）
+#   push tag v*         -> 构建 + 发布到正式 PyPI
+#   workflow_dispatch    -> 只构建，不发布
 #
-# 需要在 GitHub 仓库配置 Secrets（Settings -> Secrets and variables -> Actions）：
-#
-#   测试服务器：
-#     TEST_SSH_HOST      测试服务器 IP / 域名
-#     TEST_SSH_PORT      SSH 端口（默认 22）
-#     TEST_SSH_USER      SSH 登录用户
-#     TEST_SSH_KEY       SSH 私钥全文（-----BEGIN OPENSSH PRIVATE KEY----- ...）
-#     TEST_DEPLOY_PATH   远端部署目录（dist 会传到该目录下）
-#
-#   正式服务器：
-#     PROD_SSH_HOST / PROD_SSH_PORT / PROD_SSH_USER / PROD_SSH_KEY / PROD_DEPLOY_PATH
-#
-# 如果你希望改成发布到 PyPI（而不是自己的服务器），把 deploy-* 两个 job
-# 换成 pypa/gh-action-pypi-publish 即可，build job 保持不变。
+# 免密推送：在 PyPI / TestPyPI 后台把本仓库配置为“被信任的发布者”(Trusted Publisher / OIDC)，
+# 这里靠 id-token: write 走 OIDC，不需要任何 API token / 密码。
 on:
   push:
     branches: [main]
@@ -26,12 +14,6 @@ on:
   pull_request:
     branches: [main]
   workflow_dispatch:
-    inputs:
-      target:
-        description: "手动部署目标"
-        type: choice
-        default: test
-        options: [test, prod]
 
 jobs:
   build:
@@ -78,12 +60,14 @@ jobs:
           path: dist/
           retention-days: 7
 
-  # push main / PR -> 部署到测试服务器
-  deploy-test:
-    name: Deploy to test server
+  # push main / PR -> 发到 TestPyPI
+  publish-test:
+    name: Publish to TestPyPI
     needs: build
     runs-on: ubuntu-latest
-    if: (github.event_name == 'push' && github.ref == 'refs/heads/main') || (github.event_name == 'workflow_dispatch' && github.event.inputs.target == 'test')
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    permissions:
+      id-token: write
     steps:
       - name: Download build artifacts
         uses: actions/download-artifact@v4
@@ -91,34 +75,20 @@ jobs:
           name: dist
           path: dist/
 
-      - name: Copy package to test server
-        uses: appleboy/scp-action@v0.1.7
+      - name: Publish to TestPyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
         with:
-          host: ${{ secrets.TEST_SSH_HOST }}
-          username: ${{ secrets.TEST_SSH_USER }}
-          port: ${{ secrets.TEST_SSH_PORT }}
-          key: ${{ secrets.TEST_SSH_KEY }}
-          source: "dist/*.whl,dist/*.tar.gz"
-          target: ${{ secrets.TEST_DEPLOY_PATH }}
+          repository-url: https://test.pypi.org/legacy/
+          verbose: true
 
-      - name: Install package on test server
-        uses: appleboy/ssh-action@v1.0.3
-        with:
-          host: ${{ secrets.TEST_SSH_HOST }}
-          username: ${{ secrets.TEST_SSH_USER }}
-          port: ${{ secrets.TEST_SSH_PORT }}
-          key: ${{ secrets.TEST_SSH_KEY }}
-          script: |
-            cd ${{ secrets.TEST_DEPLOY_PATH }}
-            python3 -m pip install --upgrade --force-reinstall dist/*.whl
-            wechat-publish --help
-
-  # push tag v* -> 部署到正式服务器
-  deploy-prod:
-    name: Deploy to production server
+  # push tag v* -> 发到正式 PyPI
+  publish-prod:
+    name: Publish to PyPI
     needs: build
     runs-on: ubuntu-latest
-    if: startsWith(github.ref, 'refs/tags/v') || (github.event_name == 'workflow_dispatch' && github.event.inputs.target == 'prod')
+    if: startsWith(github.ref, 'refs/tags/v')
+    permissions:
+      id-token: write
     steps:
       - name: Download build artifacts
         uses: actions/download-artifact@v4
@@ -126,24 +96,7 @@ jobs:
           name: dist
           path: dist/
 
-      - name: Copy package to production server
-        uses: appleboy/scp-action@v0.1.7
+      - name: Publish to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
         with:
-          host: ${{ secrets.PROD_SSH_HOST }}
-          username: ${{ secrets.PROD_SSH_USER }}
-          port: ${{ secrets.PROD_SSH_PORT }}
-          key: ${{ secrets.PROD_SSH_KEY }}
-          source: "dist/*.whl,dist/*.tar.gz"
-          target: ${{ secrets.PROD_DEPLOY_PATH }}
-
-      - name: Install package on production server
-        uses: appleboy/ssh-action@v1.0.3
-        with:
-          host: ${{ secrets.PROD_SSH_HOST }}
-          username: ${{ secrets.PROD_SSH_USER }}
-          port: ${{ secrets.PROD_SSH_PORT }}
-          key: ${{ secrets.PROD_SSH_KEY }}
-          script: |
-            cd ${{ secrets.PROD_DEPLOY_PATH }}
-            python3 -m pip install --upgrade --force-reinstall dist/*.whl
-            wechat-publish --help
+          verbose: true

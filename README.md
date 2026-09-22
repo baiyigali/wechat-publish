@@ -107,13 +107,13 @@ from wechat_publish import (
 
 ## CI / 自动发布
 
-仓库自带 GitHub Actions（`.github/workflows/publish.yml`）：
+仓库自带 GitHub Actions（`.github/workflows/publish.yml`），与常见开源 Python 包一致：
 
-- **push 到 `main`** → 编译 sdist + wheel，自动部署到**测试服务器**；
-- **打 tag `v*`** → 编译后部署到**正式服务器**；
-- 也支持在 Actions 页面手动触发（`workflow_dispatch`）选择测试 / 正式环境。
+- **push 到 `main`** → 编译 sdist + wheel，自动发布到 **TestPyPI**（官方测试源，验证打包流程不污染正式版）；
+- **打 tag `v*`**（如 `v1.0.0`）→ 编译后发布到**正式 PyPI**；
+- 也支持在 Actions 页面手动触发（`workflow_dispatch`），只编译不发布。
 
-服务器连接信息通过 GitHub Secrets 配置（SSH host / user / port / private key / 部署目录），详见 workflow 文件头部注释。
+免密推送：在 PyPI / TestPyPI 后台把本仓库配置为 **Trusted Publisher（OIDC）**，workflow 里 `id-token: write` 自动换取临时凭据，不需要任何 `PYPI_API_TOKEN`。
 
 ## 技术交流
 
