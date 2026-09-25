@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "wechat-publish"
-version = "1.0.0"
+version = "1.0.1"
 description = "Programmatically push rendered HTML articles (with auto-rehosted images) to a WeChat Official Account (公众号) draft box, and optionally publish them."
 readme = "README.md"
 requires-python = ">=3.9"

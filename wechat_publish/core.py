@@ -9,7 +9,7 @@ from __future__ import annotations
 import json
 import re
 from pathlib import Path
-from urllib.parse import urlparse
+from urllib.parse import urlparse, unquote
 
 import requests
 
@@ -65,9 +65,22 @@ def upload_cover(token: str, image_path: str | Path) -> str:
     return media_id
 
 
-def upload_content_images(token: str, html: str) -> str:
-    """Download every external <img> in *html*, upload it to WeChat, and
-    rewrite the ``src`` to WeChat's own CDN URL.
+IMAGE_EXT_TYPES = {
+    ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".png": "image/png",
+    ".gif": "image/gif", ".webp": "image/webp",
+}
+
+
+def upload_content_images(token: str, html: str, base_dir: str | Path | None = None) -> str:
+    """Re-host every non-WeChat <img> in *html* and rewrite ``src`` to
+    WeChat's own CDN URL.
+
+    Two source kinds are supported:
+    - http(s) URLs: downloaded then uploaded (original behavior);
+    - local paths (relative or absolute, optional ``file://`` prefix):
+      read from disk and uploaded. Relative paths are resolved against
+      ``base_dir`` (typically the directory of the rendered HTML file),
+      falling back to the current working directory.
 
     WeChat filters non-WeChat image URLs out of article content, so we
     must proxy them through ``/cgi-bin/media/uploadimg`` first.
@@ -82,14 +95,33 @@ def upload_content_images(token: str, html: str) -> str:
         if "mmbiz.qpic.cn" in host or "mmecoa.com" in host:
             continue
 
-        try:
-            resp = requests.get(url, timeout=30)
-            resp.raise_for_status()
-        except Exception as e:
-            print(f"  [warn] failed to download {url}: {e}")
-            continue
+        # --- fetch image bytes: remote URL or local file ---
+        content: bytes | None = None
+        content_type = "image/jpeg"
+        if urlparse(url).scheme in ("http", "https"):
+            try:
+                resp = requests.get(url, timeout=30)
+                resp.raise_for_status()
+            except Exception as e:
+                print(f"  [warn] failed to download {url}: {e}")
+                continue
+            content = resp.content
+            content_type = resp.headers.get("Content-Type", "image/jpeg")
+        else:
+            local = urlparse(url).path if urlparse(url).scheme == "file" else url
+            path = Path(unquote(local))
+            if not path.is_absolute() and base_dir is not None:
+                path = Path(base_dir) / path
+            if not path.exists():
+                print(f"  [warn] local image not found, skipped: {path}")
+                continue
+            try:
+                content = path.read_bytes()
+            except Exception as e:
+                print(f"  [warn] failed to read local image {path}: {e}")
+                continue
+            content_type = IMAGE_EXT_TYPES.get(path.suffix.lower(), "image/jpeg")
 
-        content_type = resp.headers.get("Content-Type", "image/jpeg")
         ext_map = {
             "image/jpeg": "jpg", "image/jpg": "jpg", "image/png": "png",
             "image/gif": "gif", "image/webp": "webp",
@@ -100,7 +132,7 @@ def upload_content_images(token: str, html: str) -> str:
         up = requests.post(
             f"{BASE}/media/uploadimg",
             params={"access_token": token},
-            files={"media": (fname, resp.content, content_type)},
+            files={"media": (fname, content, content_type)},
             timeout=30,
         )
         up_data = up.json()
@@ -208,8 +240,8 @@ def push_articles(
             raise FileNotFoundError(f"HTML file not found: {html_path}")
         content = html_path.read_text(encoding="utf-8")
 
-        # Rehost external images
-        content = upload_content_images(token, content)
+        # Rehost external images (relative local srcs resolve against the HTML's dir)
+        content = upload_content_images(token, content, base_dir=html_path.parent)
 
         # Upload cover
         cover_path = Path(art["cover_path"])
